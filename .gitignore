@@ -27,3 +27,7 @@ checkpoints/
 
 # misc
 *.log
+
+# large artifacts
+*.pkl
+checkpoints/

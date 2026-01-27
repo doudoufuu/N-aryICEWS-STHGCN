@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# env
+.venv/
+venv/
+env/
+*.egg-info/
+
+# data
+data/
+dataset/
+datasets/
+
+# outputs
+logs/
+output/
+outputs/
+runs/
+wandb/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# misc
+*.log

@@ -31,3 +31,4 @@ checkpoints/
 # large artifacts
 *.pkl
 checkpoints/
+event_graph_ckpt.pkl

@@ -1,0 +1,8 @@
+tqdm==4.54.1
+pyyaml==6.0
+pandas==0.24.2
+numba==0.47.0
+scipy==1.4.1
+tensorboard==1.15.0
+scikit-learn==0.23.2
+shapely==2.0.1

@@ -1006,6 +1006,7 @@ def preprocess_csv_events(data_path: bytes, preprocessed_path: bytes, cfg: Cfg) 
         preprocessed_path = preprocessed_path.decode()
 
     os.makedirs(preprocessed_path, exist_ok=True)
+    dataset_args = getattr(cfg, 'dataset_args', None)
     progress_file = osp.join(preprocessed_path, 'preprocess_progress.pkl')
     progress = {
         'raw_loaded': False,
@@ -1084,17 +1085,32 @@ def preprocess_csv_events(data_path: bytes, preprocessed_path: bytes, cfg: Cfg) 
 
     # 4.1 筛选小规模数据集（保持事件链完整）
     if not progress.get('small_dataset_selected'):
-        print('[CSV Events] 筛选小规模数据集（保持事件链完整）...')
-        chain_sizes = df.groupby('EventChain_id').size().reset_index(name='count')
-        chain_sizes = chain_sizes.sort_values(by='EventChain_id')
-        selected_chains, total_rows = [], 0
-        for chain_id, count in zip(chain_sizes['EventChain_id'], chain_sizes['count']):
-            if total_rows + count > 200000:
-                break
-            selected_chains.append(chain_id)
-            total_rows += count
-        df = df[df['EventChain_id'].isin(selected_chains)].copy()
-        print(f"[CSV Events] 小规模数据集筛选完成: {len(df)} 行, {len(selected_chains)} 条事件链")
+        # 可选截断：默认不截断，若在配置中设置 csv_events_row_cap / max_csv_events_rows 则启用
+        row_cap = None
+        if dataset_args is not None:
+            row_cap = getattr(dataset_args, 'csv_events_row_cap', None)
+            if row_cap is None:
+                row_cap = getattr(dataset_args, 'max_csv_events_rows', None)
+
+        if row_cap is None or row_cap <= 0:
+            print('[CSV Events] 未设置行数截断，保留全量数据。')
+        else:
+            print(f'[CSV Events] 按配置截断到最多 {row_cap} 行（保持事件链完整）...')
+            chain_sizes = (
+                df.groupby('EventChain_id')
+                  .size()
+                  .reset_index(name='count')
+                  .sort_values(by='EventChain_id')
+            )
+            selected_chains, total_rows = [], 0
+            for chain_id, count in zip(chain_sizes['EventChain_id'], chain_sizes['count']):
+                if total_rows + count > row_cap:
+                    break
+                selected_chains.append(chain_id)
+                total_rows += count
+            df = df[df['EventChain_id'].isin(selected_chains)].copy()
+            print(f"[CSV Events] 截断完成: {len(df)} 行, {len(selected_chains)} 条事件链")
+
         progress['small_dataset_selected'] = True
         with open(progress_file, 'wb') as f:
             pickle.dump(progress, f)

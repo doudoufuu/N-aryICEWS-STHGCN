@@ -24,6 +24,8 @@ dataset_args:
   chain_time_bucket_days: 30
   chain_geo_grid_deg: 2.0
   chain_candidate_topk: 30
+  # CSV 事件截断行数；<=0 表示不截断（默认保留全量），>0 时按事件链累加到该行数为止
+  csv_events_row_cap: 0
 
 # 模型参数
 model_args:

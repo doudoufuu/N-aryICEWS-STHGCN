@@ -1608,6 +1608,7 @@ def generate_event_graph(data1, args, ci2traj_pyg_data, checkin_offset, output_p
 
     # 文件名里带上阈值，避免混淆
     edge_file = os.path.join(save_dir, f"event_edges_threshold{1}.pt")  # 可以改成 args.threshold
+    delta_file = osp.join(save_dir, "event_edge_deltas.pt")
 
     # --- 按阈值筛选边 ---
     if os.path.exists(edge_file):
@@ -1636,6 +1637,15 @@ def generate_event_graph(data1, args, ci2traj_pyg_data, checkin_offset, output_p
         edge_attr = torch.empty((0,1), dtype=torch.float)
         event_edge_delta_t = torch.empty((0,1), dtype=torch.float)
         event_edge_delta_s = torch.empty((0,1), dtype=torch.float)
+        # 保存空 delta，避免后续引用错误
+        try:
+            torch.save({
+                "event_edge_delta_t": event_edge_delta_t,
+                "event_edge_delta_s": event_edge_delta_s,
+                "time_scale": TIME_SCALE,
+            }, delta_file)
+        except Exception:
+            pass
     else:
         try:
             _eid_sorted = np.sort(data['ID'].unique())
@@ -1671,16 +1681,16 @@ def generate_event_graph(data1, args, ci2traj_pyg_data, checkin_offset, output_p
         delta_file = osp.join(save_dir, "event_edge_deltas.pt")
 
         # --- 如果已有缓存，直接加载 ---
-    if os.path.exists(delta_file):
-        print(f"[EventGraph] 检测到缓存文件 {delta_file}，直接加载...")
-        checkpoint = torch.load(delta_file)
-        event_edge_delta_t = checkpoint["event_edge_delta_t"]
-        cache_scale = checkpoint.get("time_scale", None)
-        if cache_scale is None or abs(float(cache_scale) - TIME_SCALE) > 1e-6:
-            event_edge_delta_t = event_edge_delta_t / TIME_SCALE
-        event_edge_delta_s = checkpoint["event_edge_delta_s"]
-        print(f"[EventGraph] 恢复完成，delta_t.shape={event_edge_delta_t.shape}, delta_s.shape={event_edge_delta_s.shape}")
-    else:
+        if os.path.exists(delta_file):
+            print(f"[EventGraph] 检测到缓存文件 {delta_file}，直接加载...")
+            checkpoint = torch.load(delta_file)
+            event_edge_delta_t = checkpoint["event_edge_delta_t"]
+            cache_scale = checkpoint.get("time_scale", None)
+            if cache_scale is None or abs(float(cache_scale) - TIME_SCALE) > 1e-6:
+                event_edge_delta_t = event_edge_delta_t / TIME_SCALE
+            event_edge_delta_s = checkpoint["event_edge_delta_s"]
+            print(f"[EventGraph] 恢复完成，delta_t.shape={event_edge_delta_t.shape}, delta_s.shape={event_edge_delta_s.shape}")
+        else:
             # --- 正常计算 ---
             delta_t, delta_s = [], []
 

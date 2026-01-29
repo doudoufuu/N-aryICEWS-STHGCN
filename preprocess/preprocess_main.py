@@ -1850,6 +1850,13 @@ def preprocess(cfg: Cfg):
         data_path = osp.join(root_path, 'data', dataset_name)
         # 使用参数构造预处理数据路径
         preprocessed_path = osp.join(data_path, f'preprocessed_6')
+
+    # 回写路径到 cfg，供后续 loader / force_rebuild 使用
+    try:
+        cfg.dataset_args.data_path = preprocessed_path
+        cfg.dataset_args.preprocessed_path = preprocessed_path
+    except Exception:
+        pass
     
     print(f"[Preprocess] 数据路径: {data_path}")
     print(f"[Preprocess] 预处理路径: {preprocessed_path}")

@@ -95,6 +95,20 @@ def main():
     args = parser.parse_args()   
 
     cfg = Cfg(args.yaml_file)   
+    # 兼容 wikipeople 配置：沿用 csv_events 流水线但标记 source
+    if str(getattr(cfg.dataset_args, "dataset_name", "")).lower() == "wikipeople":
+        cfg.dataset_args.source = "wikipeople"
+        cfg.dataset_args.dataset_name = "csv_events"
+        # 若未显式指定输出路径，则默认写到 data/wikipeople/preprocessed_6
+        if not getattr(cfg, "output_path", None) and not getattr(cfg.dataset_args, "output_path", None):
+            root_dir = get_root_dir()
+            cfg.dataset_args.output_path = osp.join(root_dir, "data", "wikipeople", "preprocessed_6")
+            print(f"[Run] 检测到 wikipeople 数据集，设置 output_path = {cfg.dataset_args.output_path}")
+        # 统一 data_path，避免仍指向 csv_events 默认路径
+        out_path = getattr(cfg.dataset_args, "output_path", None) or getattr(cfg, "output_path", None)
+        if out_path:
+            cfg.dataset_args.data_path = out_path
+
     cfg.model_args.sizes = [int(size) for size in str(cfg.model_args.sizes).split("-")]   
 
     cli_init_ckpt = args.init_checkpoint.strip() if isinstance(args.init_checkpoint, str) else None

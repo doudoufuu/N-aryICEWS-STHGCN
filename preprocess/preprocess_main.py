@@ -9,8 +9,9 @@ import csv
 import pickle  # 用于序列化和反序列化Python对象
 import pandas as pd  # 数据处理库
 import numpy as np  # 数值计算库
+import re
 from collections import defaultdict
-from datetime import datetime, time  # 日期时间处理
+from datetime import datetime, time, timezone  # 日期时间处理
 import os.path as osp  # 路径处理工具
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 import random
@@ -313,6 +314,36 @@ def _parse_wikipeople_date(raw_value: Optional[str]) -> Optional[str]:
     except Exception:
         return None
     return f"{year}-{month}-{day}"
+
+
+_DATE_RE = re.compile(r"^\s*(\d{1,4})-(\d{1,2})-(\d{1,2})")
+
+
+def _safe_date_to_epoch_seconds(value: Optional[str]) -> Optional[int]:
+    """
+    Parse YYYY-MM-DD to epoch seconds using python datetime.
+    Works for years < 1677 (no pandas datetime64[ns]).
+    Returns None if parse fails.
+    """
+    if value is None:
+        return None
+    m = _DATE_RE.match(str(value))
+    if not m:
+        return None
+    year, month, day = map(int, m.groups())
+    if month < 1:
+        month = 1
+    if month > 12:
+        month = 12
+    if day < 1:
+        day = 1
+    if day > 31:
+        day = 31
+    try:
+        dt = datetime(year, month, day, 0, 0, 0, tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return None
 
 
 def _generate_wikipeople_eventsid_chainid_csv(cfg, out_csv: str):
@@ -1249,9 +1280,20 @@ def preprocess_csv_events(data_path: bytes, preprocessed_path: bytes, cfg: Cfg) 
     # 2. 时间转换
     if not progress['time_converted']:
         print('[CSV Events] 转换UTC时间...')
-        df['UTCTime'] = pd.to_datetime(df['UTC_time'])
-        df['UTCTimeOffset'] = df['UTCTime']
-        df['UTCTimeOffsetEpoch'] = df['UTCTimeOffset'].astype(np.int64) // 10**9
+        is_wikipeople = dataset_args is not None and str(getattr(dataset_args, "source", "")).lower() == "wikipeople"
+        if is_wikipeople:
+            df['UTCTime'] = df['UTC_time'].astype(str)
+            df['UTCTimeOffset'] = df['UTCTime']
+            epoch = df['UTC_time'].apply(_safe_date_to_epoch_seconds)
+            bad = epoch.isna()
+            if bad.any():
+                df = df.loc[~bad].copy()
+                epoch = epoch.loc[~bad]
+            df['UTCTimeOffsetEpoch'] = epoch.astype(np.int64)
+        else:
+            df['UTCTime'] = pd.to_datetime(df['UTC_time'])
+            df['UTCTimeOffset'] = df['UTCTime']
+            df['UTCTimeOffsetEpoch'] = df['UTCTimeOffset'].astype(np.int64) // 10**9
         print(f"[CSV Events] 时间转换完成，时间范围: {df['UTCTimeOffsetEpoch'].min()} - {df['UTCTimeOffsetEpoch'].max()}")
         progress['time_converted'] = True
         with open(progress_file, 'wb') as f:

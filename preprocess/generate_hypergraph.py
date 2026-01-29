@@ -141,13 +141,54 @@ def generate_hypergraph_from_file(input_file, output_path, args):
     # 步骤1: 读取数据
     if checkpoint is None or checkpoint.get('step') != 'data_loaded':
         print("[Hypergraph] 步骤1: 读取预处理样本CSV...")
+        missing_cols = []
         try:
-            data = pd.read_csv(input_file, usecols=usecols)
-            print(f"[Hypergraph] 读取完成 | 行数={len(data)} | 列={len(data.columns)}")
-            save_checkpoint(checkpoint_file, 'data_loaded', data=data)
+            header = pd.read_csv(input_file, nrows=0)
+            available_cols = [c for c in usecols if c in header.columns]
+            missing_cols = [c for c in usecols if c not in header.columns]
+            data = pd.read_csv(input_file, usecols=available_cols if available_cols else None)
         except Exception as e:
-            print(f"[Hypergraph] 读取数据失败: {e}")
-            return
+            print(f"[Hypergraph] 按usecols读取失败，回退全量读取: {e}")
+            data = pd.read_csv(input_file)
+            missing_cols = [c for c in usecols if c not in data.columns]
+
+        defaults = {
+            'Source_Country_encoded': 'UNK_COUNTRY',
+            'Target_Country_encoded': 'UNK_COUNTRY',
+            'Location_encoded': 'UNK_LOC',
+            'latitude': 0.0,
+            'longitude': 0.0,
+            'Intensity': 0.0,
+        }
+        for col, val in defaults.items():
+            if col not in data.columns:
+                data[col] = val
+
+        if 'check_ins_id' not in data.columns:
+            data['check_ins_id'] = np.arange(len(data), dtype=np.int64)
+
+        if 'UTCTimeOffsetEpoch' not in data.columns:
+            if 'UTCTimeOffset' in data.columns:
+                ts = pd.to_datetime(data['UTCTimeOffset'], errors='coerce')
+            elif 'UTC_time' in data.columns:
+                ts = pd.to_datetime(data['UTC_time'], errors='coerce')
+            else:
+                ts = None
+            if ts is not None:
+                data['UTCTimeOffsetEpoch'] = ts.view('int64') // 10**9
+            else:
+                data['UTCTimeOffsetEpoch'] = 0
+        data['UTCTimeOffsetEpoch'] = pd.to_numeric(data['UTCTimeOffsetEpoch'], errors='coerce').fillna(0).astype(np.int64)
+
+        if 'Event_type' in data.columns:
+            data['Event_type'] = pd.to_numeric(data['Event_type'], errors='coerce').fillna(0).astype(int)
+        if 'Intensity' in data.columns:
+            data['Intensity'] = pd.to_numeric(data['Intensity'], errors='coerce').fillna(0.0)
+
+        if missing_cols:
+            print(f"[Hypergraph] 缺失列已回填默认值: {missing_cols}")
+        print(f"[Hypergraph] 读取完成 | 行数={len(data)} | 列={len(data.columns)}")
+        save_checkpoint(checkpoint_file, 'data_loaded', data=data)
     else:
         print("[Hypergraph] 步骤1: 从检查点恢复数据...")
         data_file = checkpoint_file.replace('.pkl', '_data.pkl')
@@ -223,7 +264,7 @@ def generate_hypergraph_from_file(input_file, output_path, args):
         #如果已经有了entity_graph.pt，就跳过
         print("[Hypergraph] 步骤4: 构建第一层：实体-事件超图...")
         try:
-            ci2traj_pyg_data = new_generate_ci2traj_pyg_data(data, traj_stat, traj_column, checkin_offset)
+            ci2traj_pyg_data = new_generate_ci2traj_pyg_data(data, traj_stat, traj_column, checkin_offset, output_path)
             print(f"[Hypergraph] L1完成 | x={tuple(ci2traj_pyg_data.x.shape)} | edges={ci2traj_pyg_data.edge_index.size(1)}")
             
             # 保存第一层图
@@ -253,7 +294,7 @@ def generate_hypergraph_from_file(input_file, output_path, args):
         else:
             print("[Hypergraph] 步骤5: 构建第二层：事件图...")
             try:
-                event_graph = generate_event_graph(data, args, ci2traj_pyg_data, checkin_offset)
+                event_graph = generate_event_graph(data, args, ci2traj_pyg_data, checkin_offset, output_path)
                 print(f"[Hypergraph] L2完成 | x={tuple(event_graph.x.shape)} | edges={event_graph.edge_index.size(1)}")
                 
                 # 保存第二层图
@@ -279,7 +320,7 @@ def generate_hypergraph_from_file(input_file, output_path, args):
     if checkpoint is None or checkpoint.get('step') not in ['l3_completed','l4_completed']:
         print("[Hypergraph] 步骤6: 构建第三层：事件-事件链图...")
         try:
-            chain_graph = generate_event2chain_graph(data, args, traj_stat,checkin_offset)
+            chain_graph = generate_event2chain_graph(data, args, traj_stat, checkin_offset, output_path)
             print(f"[Hypergraph] L3完成 | x={tuple(chain_graph.x.shape)} | edges={chain_graph.edge_index.size(1)}")
             
             # 保存第三层图
@@ -879,7 +920,7 @@ def compute_relation_features(row, history_df):
         return pd.Series([0.0, 0.0, 0.0],
                          index=['relation_count', 'pos_avg_intensity', 'neg_avg_intensity'])
 
-def new_generate_ci2traj_pyg_data(data, traj_stat, traj_column, checkin_offset):
+def new_generate_ci2traj_pyg_data(data, traj_stat, traj_column, checkin_offset, output_path):
     """
     生成签到点到轨迹的关联矩阵、签到点特征矩阵，以及关系特征。
     包含进度保存和错误处理。
@@ -891,10 +932,11 @@ def new_generate_ci2traj_pyg_data(data, traj_stat, traj_column, checkin_offset):
     :return: 包含关联矩阵和签到点特征矩阵的PyG数据
     """
     print("[L1] 准备L1输入特征与关联矩阵...")
-    
+    os.makedirs(output_path, exist_ok=True)
+
     # 创建检查点文件路径
-    checkpoint_file = '/home/beihang/hsy/Spatio-Temporal-Hypergraph-Model/data/csv_events/preprocessed_6/l1_relation_features_checkpoint.pkl'
-    
+    checkpoint_file = osp.join(output_path, 'l1_relation_features_checkpoint.pkl')
+
     # 尝试加载检查点
     checkpoint = load_checkpoint(checkpoint_file)
     
@@ -969,14 +1011,14 @@ def new_generate_ci2traj_pyg_data(data, traj_stat, traj_column, checkin_offset):
     event2size_map = data.set_index('ID')['entity2event_size'].to_dict()
 
     # 保存到文件
-    map_path = osp.join('/home/beihang/hsy/Spatio-Temporal-Hypergraph-Model/data/csv_events/preprocessed_6', "event2size_map.pkl")
+    map_path = osp.join(output_path, "event2size_map.pkl")
     with open(map_path, "wb") as f:
         pickle.dump(event2size_map, f)
     print(f"[L1] 已保存 event2size_map -> {map_path}")
     print(f"[L1] data after adding entity2event_size shape={data.shape}")
     #把data保存成文件，文件名unclassify_sourcename_data.csv，判断是否保存成功并捕捉异常
     try:
-        data.to_csv('/home/beihang/hsy/Spatio-Temporal-Hypergraph-Model/data/csv_events/preprocessed_6/unclassify_sourcename_data.csv', index=False)
+        data.to_csv(osp.join(output_path, 'unclassify_sourcename_data.csv'), index=False)
         print("[L1] 保存成功")
     except Exception as e:
         print(f"[L1] 保存失败：{e}")
@@ -1125,7 +1167,7 @@ def new_generate_ci2traj_pyg_data(data, traj_stat, traj_column, checkin_offset):
     return ci2traj_pyg_data
 
 ###PATH:Spatio-Temporal-Hypergraph-Model/preprocess/generate_hypergraph.py
-def generate_event2chain_graph(data, args, traj_stat,checkin_offset):  # 事件所包含的实体数量 size):
+def generate_event2chain_graph(data, args, traj_stat, checkin_offset, output_path):  # 事件所包含的实体数量 size):
     """
     第三层图：事件-事件链二分图 (L3)
     构建事件-事件链二分图 (L3)
@@ -1134,9 +1176,17 @@ def generate_event2chain_graph(data, args, traj_stat,checkin_offset):  # 事件�
     """
     print("[Event2Chain] 开始构建事件-事件链图...")
 
-    map_path = osp.join('/home/beihang/hsy/Spatio-Temporal-Hypergraph-Model/data/csv_events/preprocessed_6', "event2size_map.pkl")
-    with open(map_path, "rb") as f:
-        event2size_map = pickle.load(f)
+    map_path = osp.join(output_path, "event2size_map.pkl")
+    try:
+        with open(map_path, "rb") as f:
+            event2size_map = pickle.load(f)
+    except Exception as exc:
+        print(f"[L2] 读取 event2size_map 失败，使用当前数据重建: {exc}")
+        tmp = data.copy()
+        if 'entity2event_size' in tmp.columns:
+            event2size_map = tmp.set_index('ID')['entity2event_size'].to_dict()
+        else:
+            event2size_map = tmp.groupby('ID').size().to_dict()
     print(f"[L2] 已加载 event2size_map (size={len(event2size_map)})")
     # ========= 事件节点 =========
     # 按事件ID去重（避免 Source / Target 重复）
@@ -1150,7 +1200,11 @@ def generate_event2chain_graph(data, args, traj_stat,checkin_offset):  # 事件�
 
     # ========= 事件节点特征 =========
      # --- 构造事件节点特征矩阵 ---
-    data_unclassify = pd.read_csv('/home/beihang/hsy/Spatio-Temporal-Hypergraph-Model/data/csv_events/preprocessed_6/unclassify_sourcename_data.csv')
+    try:
+        data_unclassify = pd.read_csv(osp.join(output_path, 'unclassify_sourcename_data.csv'))
+    except Exception as exc:
+        print(f"[Event2Chain] 未找到预存的 unclassify 数据，使用当前 data 代替: {exc}")
+        data_unclassify = data.copy()
     
     print("[EventGraph] 构造事件节点特征矩阵...")
     event_features = []
@@ -1382,13 +1436,12 @@ def generate_event_graph(data1, args, ci2traj_pyg_data, checkin_offset, output_p
     import pickle, os
     from collections import defaultdict
 
+    base_path = output_path if output_path else os.getcwd()
+    os.makedirs(base_path, exist_ok=True)
     # checkpoint 文件路径
-    checkpoint_path = osp.join(
-        '/home/beihang/hsy/Spatio-Temporal-Hypergraph-Model/data/csv_events/preprocessed_6',
-        "event_edges_ckpt.pkl"
-    )
+    checkpoint_path = osp.join(base_path, "event_edges_ckpt.pkl")
 
-    map_path = osp.join('/home/beihang/hsy/Spatio-Temporal-Hypergraph-Model/data/csv_events/preprocessed_6', "event2size_map.pkl")
+    map_path = osp.join(base_path, "event2size_map.pkl")
     try:
         with open(map_path, "rb") as f:
             event2size_map = pickle.load(f)
@@ -1746,7 +1799,6 @@ def generate_event_graph(data1, args, ci2traj_pyg_data, checkin_offset, output_p
 #     生成第二层事件图（事件节点图），事件以唯一ID聚合
 #     """
 
-#     map_path = osp.join('/home/beihang/hsy/Spatio-Temporal-Hypergraph-Model/data/csv_events/preprocessed_3', "event2size_map.pkl")
 #     with open(map_path, "rb") as f:
 #         event2size_map = pickle.load(f)
 #     print(f"[L2] 已加载 event2size_map (size={len(event2size_map)})")

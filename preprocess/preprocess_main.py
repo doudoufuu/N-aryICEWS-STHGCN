@@ -247,6 +247,11 @@ def _ensure_eventsid_chainid_csv(raw_path, cfg):
         return csv_path
 
     dataset_args = getattr(cfg, "dataset_args", None)
+    source = getattr(dataset_args, "source", None) if dataset_args is not None else None
+    os.makedirs(raw_path, exist_ok=True)
+    if source is not None and str(source).lower() == "wikipeople":
+        return _generate_wikipeople_eventsid_chainid_csv(cfg, csv_path)
+
     jsonl_path = None
     if dataset_args is not None:
         jsonl_path = getattr(dataset_args, "combined_events_jsonl", None) or getattr(
@@ -259,9 +264,192 @@ def _ensure_eventsid_chainid_csv(raw_path, cfg):
     if not osp.exists(jsonl_path):
         raise FileNotFoundError(f"[CSV Bridge] JSONL not found: {jsonl_path}")
 
-    os.makedirs(raw_path, exist_ok=True)
     _generate_eventsid_chainid_csv(jsonl_path, csv_path)
     return csv_path
+
+
+def _parse_wikipeople_date(raw_value: Optional[str]) -> Optional[str]:
+    """
+    Parse WikiPeople time string like \"+1903-01-01T00:00:00Z#...\" to YYYY-MM-DD.
+    Month/day of 00 are replaced with 01.
+    """
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, (list, tuple)):
+        if not raw_value:
+            return None
+        raw_value = raw_value[0]
+    raw = str(raw_value)
+    if "#" in raw:
+        raw = raw.split("#", 1)[0]
+    if raw.startswith(("+", "-")):
+        raw = raw[1:]
+    if "T" in raw:
+        raw = raw.split("T", 1)[0]
+    parts = raw.split("-")
+    if len(parts) < 3:
+        return None
+    year, month, day = parts[0], parts[1], parts[2]
+    if month == "00":
+        month = "01"
+    if day == "00":
+        day = "01"
+    try:
+        # Validate format
+        datetime.strptime(f"{year}-{month}-{day}", "%Y-%m-%d")
+    except Exception:
+        return None
+    return f"{year}-{month}-{day}"
+
+
+def _generate_wikipeople_eventsid_chainid_csv(cfg, out_csv: str):
+    dataset_args = getattr(cfg, "dataset_args", None)
+    if dataset_args is None:
+        raise ValueError("[WikiPeople] dataset_args missing in cfg")
+
+    jsonl_path = getattr(dataset_args, "wikipeople_jsonl", None)
+    if not jsonl_path:
+        raise ValueError("[WikiPeople] cfg.dataset_args.wikipeople_jsonl is required")
+    if not osp.isabs(jsonl_path):
+        candidate = osp.join(get_root_dir(), jsonl_path)
+        jsonl_path = candidate if osp.exists(candidate) else jsonl_path
+    if not osp.exists(jsonl_path):
+        raise FileNotFoundError(f"[WikiPeople] JSONL not found: {jsonl_path}")
+
+    chain_chunk_size = int(getattr(dataset_args, "chain_chunk_size", 16) or 16)
+    if chain_chunk_size <= 0:
+        chain_chunk_size = 16
+    drop_no_time = bool(getattr(dataset_args, "drop_no_time", True))
+
+    output_base = getattr(cfg, "output_path", None) or getattr(dataset_args, "output_path", None)
+    if output_base is None:
+        # Fallback: use preprocessed parent directory
+        output_base = osp.abspath(osp.join(osp.dirname(out_csv), os.pardir))
+    os.makedirs(output_base, exist_ok=True)
+    os.makedirs(osp.dirname(out_csv), exist_ok=True)
+
+    property2id_path = osp.join(output_base, "property2id.json")
+    property2id = {}
+    if osp.exists(property2id_path):
+        try:
+            with open(property2id_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                # Ensure int values
+                property2id = {str(k): int(v) for k, v in loaded.items()}
+            print(f"[WikiPeople] Loaded existing property2id mapping ({len(property2id)} entries)")
+        except Exception as exc:
+            logging.warning("[WikiPeople] Failed to load property2id.json: %s", exc)
+            property2id = {}
+
+    rows = []
+    dropped_no_time = 0
+    bad_lines = 0
+
+    with open(jsonl_path, "r", encoding="utf-8") as src:
+        for line_idx, line in enumerate(src, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                bad_lines += 1
+                if bad_lines <= 5:
+                    logging.warning("[WikiPeople] JSON decode error at line %d: %s", line_idx, exc)
+                continue
+
+            # Pick the first property that has both head and tail
+            prop_key = None
+            for key in sorted(obj.keys()):
+                if not key.startswith("P"):
+                    continue
+                if f"{key}_h" in obj and f"{key}_t" in obj:
+                    prop_key = key
+                    break
+            if prop_key is None:
+                continue
+
+            head = obj.get(f"{prop_key}_h")
+            tail = obj.get(f"{prop_key}_t")
+
+            time_val = None
+            for t_key in ("P585", "P580", "P582"):
+                if t_key in obj and obj[t_key]:
+                    t_val = obj[t_key]
+                    if isinstance(t_val, list):
+                        time_val = t_val[0] if t_val else None
+                    else:
+                        time_val = t_val
+                    if time_val:
+                        break
+
+            utc_date = _parse_wikipeople_date(time_val)
+            if utc_date is None:
+                if drop_no_time:
+                    dropped_no_time += 1
+                    continue
+                utc_date = ""
+
+            if prop_key not in property2id:
+                property2id[prop_key] = len(property2id) + 1
+            event_type = int(property2id[prop_key])
+
+            rows.append({
+                "ID": f"WKP_{len(rows):08d}",
+                "EventChain_id": "",
+                "UTC_time": utc_date,
+                "local_time": utc_date,
+                "timezone": 0,
+                "day_of_week": "",
+                "norm_in_day_time": 0.0,
+                "norm_day_shift": 0.0,
+                "norm_relative_time": 0.0,
+                "Event_type": event_type,
+                "EventText": prop_key,
+                "Structure_Type": "one-to-many",
+                "Source_name_encoded": head,
+                "Target_name_encoded": tail,
+                "Source_Country_encoded": "UNK_COUNTRY",
+                "Target_Country_encoded": "UNK_COUNTRY",
+                "Location_encoded": "UNK_LOC",
+                "latitude": 0.0,
+                "longitude": 0.0,
+                "Intensity": 0.0,
+                "Source_Sectors_encoded": "",
+                "Target_Sectors_encoded": "",
+                "Chain_order": "",
+                "_orig_idx": len(rows),
+            })
+
+    if not rows:
+        raise ValueError("[WikiPeople] No rows generated from JSONL.")
+
+    # Build EventChain_id by head grouped by time
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[row["Source_name_encoded"]].append(row)
+
+    for head, items in grouped.items():
+        items.sort(key=lambda r: (r.get("UTC_time", ""), r["_orig_idx"]))
+        for idx, row in enumerate(items):
+            chunk_idx = idx // chain_chunk_size
+            row["EventChain_id"] = f"{head}#chunk{chunk_idx}"
+
+    for row in rows:
+        row.pop("_orig_idx", None)
+
+    with open(out_csv, "w", newline="", encoding="utf-8") as dst:
+        writer = csv.DictWriter(dst, fieldnames=RAW_EVENTS_CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    with open(property2id_path, "w", encoding="utf-8") as f:
+        json.dump(property2id, f, ensure_ascii=False, indent=2)
+
+    print(f"[WikiPeople] Saved eventsid_chainid.csv -> {out_csv} | rows={len(rows)} | dropped_no_time={dropped_no_time} | bad_lines={bad_lines}")
+    print(f"[WikiPeople] Saved property2id.json -> {property2id_path} (size={len(property2id)})")
+    return out_csv
 
 
 def _restore_progress_df(preprocessed_path, csv_file, stage):
@@ -1061,9 +1249,12 @@ def preprocess_csv_events(data_path: bytes, preprocessed_path: bytes, cfg: Cfg) 
 
     # 3. 对称事件过滤
     if not progress['filtered']:
-        print('[CSV Events] 开始全局对称事件过滤...')
-        df = filter_symmetric_events(df, target_country=None)
-        print(f"[CSV Events] 对称事件过滤完成，剩余 {len(df)} 行数据")
+        if dataset_args is not None and str(getattr(dataset_args, "source", "")).lower() == "wikipeople":
+            print('[CSV Events] WikiPeople 源，跳过对称事件过滤。')
+        else:
+            print('[CSV Events] 开始全局对称事件过滤...')
+            df = filter_symmetric_events(df, target_country=None)
+            print(f"[CSV Events] 对称事件过滤完成，剩余 {len(df)} 行数据")
         progress['filtered'] = True
         with open(progress_file, 'wb') as f:
             pickle.dump(progress, f)
@@ -1073,9 +1264,15 @@ def preprocess_csv_events(data_path: bytes, preprocessed_path: bytes, cfg: Cfg) 
 
     # 4. 创建事件链
     if not progress['event_chains_created']:
-        print('[CSV Events] 开始创建事件链...')
-        df['EventChain_id'] = create_event_chains(df, chunk_size=8)
-        print(f"[CSV Events] 事件链创建完成，共 {df['EventChain_id'].nunique()} 个事件链")
+        if dataset_args is not None and str(getattr(dataset_args, "source", "")).lower() == "wikipeople":
+            print('[CSV Events] WikiPeople 源，使用已有 EventChain_id，跳过自动切链。')
+        else:
+            chunk_size = 8
+            if dataset_args is not None:
+                chunk_size = int(getattr(dataset_args, "chain_chunk_size", chunk_size) or chunk_size)
+            print('[CSV Events] 开始创建事件链...')
+            df['EventChain_id'] = create_event_chains(df, chunk_size=chunk_size)
+            print(f"[CSV Events] 事件链创建完成，共 {df['EventChain_id'].nunique()} 个事件链")
         progress['event_chains_created'] = True
         with open(progress_file, 'wb') as f:
             pickle.dump(progress, f)
@@ -1638,10 +1835,15 @@ def preprocess(cfg: Cfg):
     # 获取根目录
     root_path = get_root_dir()
     dataset_name = cfg.dataset_args.dataset_name
-    # 构建数据路径
-    data_path = osp.join(root_path, 'data', dataset_name)
-    # 使用参数构造预处理数据路径
-    preprocessed_path = osp.join(data_path, f'preprocessed_6')
+    custom_output_path = getattr(cfg, "output_path", None) or getattr(cfg.dataset_args, "output_path", None)
+    if custom_output_path:
+        preprocessed_path = osp.abspath(custom_output_path)
+        data_path = preprocessed_path
+    else:
+        # 构建默认数据路径
+        data_path = osp.join(root_path, 'data', dataset_name)
+        # 使用参数构造预处理数据路径
+        preprocessed_path = osp.join(data_path, f'preprocessed_6')
     
     print(f"[Preprocess] 数据路径: {data_path}")
     print(f"[Preprocess] 预处理路径: {preprocessed_path}")

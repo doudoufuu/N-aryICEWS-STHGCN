@@ -1,0 +1,107 @@
+﻿# WikiPeople -> CSV Events configuration
+dataset_args:
+  dataset_name: csv_events
+  source: wikipeople
+  wikipeople_jsonl: data/WikiPeople/wikipeople.jsonl
+  output_path: data/wikipeople/preprocessed_6
+  chain_chunk_size: 16
+  drop_no_time: true
+  csv_events_row_cap: 0
+  threshold: 0.005
+  filter_mode: jaccard
+  num_spatial_slots: 3000
+  spatial_slot_type: linear
+  do_label_encode: True
+  only_last_metric: True
+  max_d_epsilon: 5
+  coverage_strategy: entity  # 可选: entity / event / none
+  min_entity_train_occurrence: 1
+  min_event_train_occurrence: 1
+  entity_coverage_fields:
+    - Source_name_encoded
+    - Target_name_encoded
+  coverage_event_field: ID
+  dedup_eval_by_event: True
+  dedup_chain_field: EventChain_id
+  chain_time_bucket_days: 30
+  chain_geo_grid_deg: 2.0
+  chain_candidate_topk: 30
+
+# 模型参数
+model_args:
+  model_name: sthgcn
+  intra_jaccard_threshold: 0.0
+  inter_jaccard_threshold: 0.005
+  sizes: 20-40-300-500  # [MODIFIED-CONF]
+  dropout_rate: 0.15
+  num_edge_type: 2
+  #generate_edge_attr: False  # 为防 OOM 暂时关闭
+  embed_fusion_type: concat
+  embed_size: 64  # [MODIFIED-CONF]
+  st_embed_size: 64  # [MODIFIED-CONF]
+  activation: relu
+  phase_factor: 5
+  use_linear_trans: True
+  do_traj2traj: True
+  distance_encoder_type: time
+  quantile: 0.85
+  num_candidates: 5
+  num_candidates_train: 5
+  num_candidates_valid: 5
+  num_candidates_test: 5
+  tie_event_classifier: false
+  normalize_event_classifier: True
+  event_classifier_temperature: 1.0
+
+# 序列变换器参数
+seq_transformer_args:
+  sequence_length: 20
+  header_num: 2
+  encoder_layers_num: 2
+  hidden_size: 512
+  dropout: 0.3
+  do_positional_encoding: True
+
+# 卷积参数
+conv_args:
+  num_attention_heads: 4
+  residual_beta: 0.5
+  learn_beta: false
+  conv_dropout_rate: 0.15
+  trans_method: add
+  edge_fusion_mode: concat
+  head_fusion_mode: concat
+  time_fusion_mode: concat
+  residual_fusion_mode: add
+  negative_slope: 0.2
+
+# 运行参数
+run_args:
+  seed: 80786525
+  gpu: 0
+  batch_size: 8
+  eval_batch_size: 4
+  learning_rate: 0.00005  # [MODIFIED-CONF]
+  do_train: True
+  do_validate: True
+  do_test: True
+  warm_up_steps: 3000
+  cooldown_rate: 1.5
+  max_steps: 100000
+  epoch: 20
+  valid_steps: 200
+  num_workers: 0
+  init_checkpoint:
+  weight_decay: 0.0005
+  use_full_softmax: False
+  eval_full_ranking: False
+  margin_warmup_steps: 50000
+  margin_loss_enable: False
+  margin: 0.02
+  margin_weight: 0.05
+  force_rebuild: True
+  min_learning_rate: 1e-6
+  use_plateau_scheduler: false
+  lr_decay_factor: 1.0
+  max_lr_decays: 0
+  device: 'cpu'

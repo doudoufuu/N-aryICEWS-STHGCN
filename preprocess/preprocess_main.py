@@ -65,7 +65,7 @@ RAW_EVENTS_CSV_COLUMNS = [
     'Intensity', 'ID', 'Event_type', 'EventText', 'Structure_Type',
     'Source_name_encoded', 'Target_name_encoded', 'Source_Country_encoded',
     'Target_Country_encoded', 'Location_encoded', 'Source_Sectors_encoded',
-    'Target_Sectors_encoded', 'Chain_order'
+    'Target_Sectors_encoded', 'Chain_order', 'SplitTag'
 ]
 
 DEFAULT_COMBINED_EVENTS_JSONL = "/home/beihang/hsy/ICEWS/1995-2022_combined_events.jsonl"
@@ -249,10 +249,17 @@ def _generate_eventsid_chainid_csv(jsonl_path, csv_path):
 
 def _ensure_eventsid_chainid_csv(raw_path, cfg):
     csv_path = osp.join(raw_path, "eventsid_chainid.csv")
-    if osp.exists(csv_path):
-        return csv_path
-
     dataset_args = getattr(cfg, "dataset_args", None)
+    run_args = getattr(cfg, "run_args", None)
+    force_regen = bool(getattr(run_args, "force_rebuild", False))
+
+    if osp.exists(csv_path) and not force_regen:
+        return csv_path
+    if force_regen and osp.exists(csv_path):
+        try:
+            os.remove(csv_path)
+        except Exception:
+            pass
     source = getattr(dataset_args, "source", None) if dataset_args is not None else None
     os.makedirs(raw_path, exist_ok=True)
     if source is not None and str(source).lower() == "wikipeople":
@@ -364,14 +371,14 @@ def _generate_wikipeople_eventsid_chainid_csv(cfg, out_csv: str):
                     logging.warning("[WikiPeople] JSON decode error at line %d: %s", line_idx, exc)
                 continue
 
-            # Pick the first property that has both head and tail
+            # Pick the first property that has both head and tail (keys are Pxxx_h / Pxxx_t)
             prop_key = None
-            for key in sorted(obj.keys()):
-                if not key.startswith("P"):
-                    continue
-                if f"{key}_h" in obj and f"{key}_t" in obj:
-                    prop_key = key
-                    break
+            for key in obj.keys():
+                if key.startswith("P") and key.endswith("_h"):
+                    base = key[:-2]
+                    if f"{base}_t" in obj:
+                        prop_key = base
+                        break
             if prop_key is None:
                 continue
 
@@ -644,6 +651,9 @@ def _split_with_coverage(df: pd.DataFrame, cfg: Cfg) -> Tuple[pd.DataFrame, Dict
     if total_chains == 0:
         df["SplitTag"] = "train"
         return df, {"total_rows": total_rows, "train_rows": total_rows, "validation_rows": 0, "test_rows": 0}
+    if total_chains <= 2:
+        df["SplitTag"] = "train"
+        return df, {"total_chains": total_chains, "note": "too few chains, all->train"}
 
     def _compute_targets(n_chains: int) -> Tuple[int, int, int]:
         tgt_train = max(1, int(round(n_chains * 0.7)))
@@ -1427,6 +1437,8 @@ def preprocess_csv_events(data_path: bytes, preprocessed_path: bytes, cfg: Cfg) 
             else:
                 le = LabelEncoder()
                 train_vals = df[df['SplitTag'] == 'train'][field].astype(str)
+                if len(train_vals) == 0:
+                    train_vals = df[field].astype(str)
                 le.fit(train_vals)
                 new_labels = np.setdiff1d(df[field].astype(str).unique(), le.classes_)
                 if new_labels.size > 0:
@@ -1868,6 +1880,19 @@ def preprocess(cfg: Cfg):
     train_file = osp.join(preprocessed_path, 'train_sample.csv')
     validate_file = osp.join(preprocessed_path, 'validate_sample.csv')
     test_file = osp.join(preprocessed_path, 'test_sample.csv')
+
+    # 若 force_rebuild，清理旧产物以强制重跑
+    run_args = getattr(cfg, "run_args", None)
+    if bool(getattr(run_args, "force_rebuild", False)):
+        for fp in [sample_file, train_file, validate_file, test_file,
+                   osp.join(preprocessed_path, 'temp_df.pkl'),
+                   osp.join(preprocessed_path, 'preprocess_progress.pkl'),
+                   osp.join(preprocessed_path, 'label_encoding.pkl')]:
+            try:
+                if osp.exists(fp):
+                    os.remove(fp)
+            except Exception:
+                pass
 
     # 创建预处理目录（如果不存在）
     if not osp.exists(preprocessed_path):

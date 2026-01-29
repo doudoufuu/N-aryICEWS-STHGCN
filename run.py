@@ -96,7 +96,8 @@ def main():
 
     cfg = Cfg(args.yaml_file)   
     # 兼容 wikipeople 配置：沿用 csv_events 流水线但标记 source
-    if str(getattr(cfg.dataset_args, "dataset_name", "")).lower() == "wikipeople":
+    if str(getattr(cfg.dataset_args, "dataset_name", "")).lower() == "wikipeople" \
+       or str(getattr(cfg.dataset_args, "source", "")).lower() == "wikipeople":
         cfg.dataset_args.source = "wikipeople"
         cfg.dataset_args.dataset_name = "csv_events"
         # 若未显式指定输出路径，则默认写到 data/wikipeople/preprocessed_6

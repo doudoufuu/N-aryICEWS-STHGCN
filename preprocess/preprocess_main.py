@@ -15,6 +15,12 @@ import os.path as osp  # 路径处理工具
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 import random
 
+# 确保项目根目录在模块搜索路径中，避免 ModuleNotFoundError
+import sys
+PROJECT_ROOT = osp.abspath(osp.join(osp.dirname(__file__), os.pardir))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from utils import Cfg, get_root_dir  # 导入配置类和根目录获取函数
 from preprocess import (
     ignore_first,  # 忽略轨迹中的第一个签到点
